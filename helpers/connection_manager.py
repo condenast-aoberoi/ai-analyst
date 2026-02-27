@@ -2,7 +2,7 @@
 Connection Manager — unified interface for multi-warehouse connections.
 
 Manages connection lifecycle for different data warehouse backends:
-MotherDuck/DuckDB (native), PostgreSQL, BigQuery, and Snowflake.
+MotherDuck/DuckDB (native), PostgreSQL, BigQuery, Snowflake, and Databricks.
 
 Usage:
     from helpers.connection_manager import ConnectionManager
@@ -18,6 +18,7 @@ Usage:
         tables = mgr.list_tables()
 """
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -35,6 +36,12 @@ try:
 except ImportError:
     _YAML_AVAILABLE = False
 
+try:
+    from databricks import sql as _dbsql  # noqa: F401
+    _DATABRICKS_AVAILABLE = True
+except ImportError:
+    _DATABRICKS_AVAILABLE = False
+
 
 # Supported connection types and their required packages.
 SUPPORTED_TYPES = {
@@ -44,6 +51,7 @@ SUPPORTED_TYPES = {
     "postgres": {"package": "psycopg2", "installed": False},
     "bigquery": {"package": "google-cloud-bigquery", "installed": False},
     "snowflake": {"package": "snowflake-connector-python", "installed": False},
+    "databricks": {"package": "databricks-sql-connector", "installed": _DATABRICKS_AVAILABLE},
 }
 
 
@@ -139,6 +147,8 @@ class ConnectionManager:
             self._connect_bigquery()
         elif conn_type == "snowflake":
             self._connect_snowflake()
+        elif conn_type == "databricks":
+            self._connect_databricks()
         elif conn_type == "csv":
             self._connect_csv()
         else:
@@ -180,6 +190,15 @@ class ConnectionManager:
                 cur.fetchone()
                 cur.close()
                 return {"ok": True, "type": "postgres", "message": "Connected"}
+
+            elif self._conn_type == "databricks":
+                if self._connection is None:
+                    self.connect()
+                cur = self._connection.cursor()
+                cur.execute("SELECT 1")
+                cur.fetchone()
+                cur.close()
+                return {"ok": True, "type": "databricks", "message": "Connected"}
 
             elif self._conn_type == "csv":
                 csv_dir = self._csv_dir or self._config.get("csv_path", "")
@@ -226,6 +245,21 @@ class ConnectionManager:
             except Exception:
                 return []
 
+        elif self._conn_type == "databricks" and self._connection:
+            try:
+                cfg = self._config.get("connection", {})
+                catalog = cfg.get("catalog", "")
+                schema = cfg.get("schema", "")
+                cur = self._connection.cursor()
+                cur.execute(f"SHOW TABLES IN `{catalog}`.`{schema}`")
+                rows = cur.fetchall()
+                cur.close()
+                # SHOW TABLES returns rows with (database, tableName, isTemporary)
+                # column index 1 is tableName
+                return sorted(row[1] for row in rows)
+            except Exception:
+                return []
+
         elif self._conn_type == "csv":
             csv_dir = self._csv_dir or self._config.get("csv_path", "")
             if Path(csv_dir).is_dir():
@@ -252,6 +286,28 @@ class ConnectionManager:
                         "name": row.get("column_name", row.get("Field", "")),
                         "type": row.get("column_type", row.get("Type", "")),
                         "nullable": row.get("null", "YES") == "YES",
+                    })
+                return columns
+            except Exception:
+                return []
+
+        elif self._conn_type == "databricks" and self._connection:
+            try:
+                fqn = f"{self._schema_prefix}.{table_name}" if self._schema_prefix else table_name
+                cur = self._connection.cursor()
+                cur.execute(f"DESCRIBE TABLE {fqn}")
+                rows = cur.fetchall()
+                cur.close()
+                columns = []
+                for row in rows:
+                    col_name = row[0]
+                    # Skip partition metadata rows (start with '#')
+                    if col_name.startswith("#") or col_name.strip() == "":
+                        continue
+                    columns.append({
+                        "name": col_name,
+                        "type": row[1] if len(row) > 1 else "unknown",
+                        "nullable": True,
                     })
                 return columns
             except Exception:
@@ -288,6 +344,14 @@ class ConnectionManager:
         elif self._conn_type == "postgres" and self._connection:
             return pd.read_sql(sql, self._connection)
 
+        elif self._conn_type == "databricks" and self._connection:
+            cur = self._connection.cursor()
+            cur.execute(sql)
+            rows = cur.fetchall()
+            columns = [desc[0] for desc in cur.description] if cur.description else []
+            cur.close()
+            return pd.DataFrame(rows, columns=columns)
+
         raise RuntimeError(
             f"SQL queries not supported for connection type: {self._conn_type}. "
             "Use read_table() for CSV data."
@@ -317,6 +381,10 @@ class ConnectionManager:
         elif self._conn_type == "postgres" and self._connection:
             schema = self._schema_prefix or "public"
             return pd.read_sql(f"SELECT * FROM {schema}.{table_name}", self._connection)
+
+        elif self._conn_type == "databricks" and self._connection:
+            fqn = f"{self._schema_prefix}.{table_name}" if self._schema_prefix else table_name
+            return self.query(f"SELECT * FROM {fqn}")
 
         raise RuntimeError(f"Cannot read table for connection type: {self._conn_type}")
 
@@ -432,3 +500,74 @@ class ConnectionManager:
         )
         self._schema_prefix = conn_config.get("schema", "public")
         self._conn_type = "snowflake"
+
+    def _connect_databricks(self):
+        """Connect to a Databricks SQL Warehouse. Requires databricks-sql-connector.
+
+        Auth priority (first match wins):
+        1. ``cli_profile`` key in connection config → token fetched via
+           ``databricks auth token`` CLI command (no secrets in manifest).
+        2. ``token`` key → PAT token or ``$ENV_VAR`` reference.
+        3. ``client_id`` / ``client_secret`` keys → OAuth M2M env var references.
+        """
+        if not _DATABRICKS_AVAILABLE:
+            raise ConnectionError(
+                "databricks-sql-connector not installed. "
+                "Install with: pip install databricks-sql-connector"
+            )
+
+        from databricks import sql as dbsql
+
+        conn_config = self._config.get("connection", {})
+        host = conn_config.get("host", "")
+
+        # --- Auth resolution ---
+        auth = {}
+        if "cli_profile" in conn_config:
+            # Resolve token via Databricks CLI — no secrets stored in manifest.
+            import json
+            import subprocess
+            profile = conn_config["cli_profile"]
+            result = subprocess.run(
+                ["databricks", "auth", "token",
+                 "--host", f"https://{host}",
+                 "--profile", profile],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                raise ConnectionError(
+                    f"Databricks CLI auth failed for profile '{profile}': "
+                    f"{result.stderr.strip()}. "
+                    f"Run: databricks auth login --host https://{host} --profile {profile}"
+                )
+            auth["access_token"] = json.loads(result.stdout)["access_token"]
+
+        elif "token" in conn_config:
+            # PAT token — stored as $ENV_VAR reference or raw value.
+            raw = conn_config["token"]
+            env_key = raw.lstrip("$")
+            auth["access_token"] = os.environ.get(env_key, raw)
+
+        elif "client_id" in conn_config:
+            # OAuth M2M — stored as $ENV_VAR references.
+            raw_id = conn_config["client_id"]
+            raw_secret = conn_config.get("client_secret", "")
+            auth["client_id"] = os.environ.get(raw_id.lstrip("$"), raw_id)
+            auth["client_secret"] = os.environ.get(raw_secret.lstrip("$"), raw_secret)
+
+        else:
+            raise ConnectionError(
+                "Databricks connection requires one of: 'cli_profile' (Databricks CLI), "
+                "'token' (PAT), or 'client_id'/'client_secret' (OAuth M2M) "
+                "in the connection config."
+            )
+
+        self._connection = dbsql.connect(
+            server_hostname=host,
+            http_path=conn_config.get("http_path", ""),
+            **auth,
+        )
+        catalog = conn_config.get("catalog", "")
+        schema = conn_config.get("schema", "")
+        self._schema_prefix = f"{catalog}.{schema}" if catalog and schema else schema
+        self._conn_type = "databricks"

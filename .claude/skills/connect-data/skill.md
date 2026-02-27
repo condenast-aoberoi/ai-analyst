@@ -24,6 +24,7 @@ Present options:
 4. **PostgreSQL** — "I have a PostgreSQL database"
 5. **BigQuery** — "I have a Google BigQuery dataset"
 6. **Snowflake** — "I have a Snowflake warehouse"
+7. **Databricks** — "I have a Databricks SQL Warehouse (Unity Catalog)"
 
 ### Step 2: Collect Connection Details
 
@@ -46,6 +47,52 @@ Present options:
 - Ask user to fill in required fields
 - **IMPORTANT:** Never ask for or store passwords directly. Guide the user
   to use environment variables (e.g., `$PG_PASSWORD`).
+
+**For Databricks:**
+
+Prompt for connection details one at a time:
+
+1. Ask: "What is your Databricks workspace hostname?"
+   - No `https://` prefix — just the hostname
+   - Azure: `{workspace}.azuredatabricks.net`
+   - AWS: `{workspace}.cloud.databricks.com`
+   - GCP: `{workspace}.gcp.databricks.com`
+   - Where to find it: top-right of your Databricks workspace URL
+
+2. Ask: "What is the HTTP path for your SQL Warehouse?"
+   - Format: `/sql/1.0/warehouses/{id}`
+   - Where to find it: Databricks UI → SQL Warehouses → select warehouse → Connection Details → HTTP Path
+
+3. Ask: "What Unity Catalog catalog should I connect to?" (e.g., `main`)
+
+4. Ask: "What schema within that catalog?" (e.g., `default`, `analytics`)
+
+5. Guide auth setup with a decision tree — ask each question in sequence:
+
+   **Q: "Is the Databricks CLI installed on this machine?"** (`databricks --version` to check)
+   - **Yes** → Ask: "Do you have a profile already configured in `~/.databrickscfg`?"
+     - **Yes** → Ask: "What is the profile name?" → store as `cli_profile: "{name}"` in manifest
+     - **No** → Instruct: Run `databricks auth login --host https://{host}` — it will prompt
+       for your workspace and save a profile. Ask for the profile name once complete.
+   - **No** → Ask: "Do you have a Personal Access Token (PAT)?"
+     - **Yes** → Instruct: `export DATABRICKS_TOKEN=dapi...` in shell before launching Claude.
+       Store `token: "$DATABRICKS_TOKEN"` in manifest. Never store the raw token.
+     - **No** → Ask: "Do you have OAuth M2M client credentials (client ID + secret)?"
+       - **Yes** → Instruct: Set `export DATABRICKS_CLIENT_ID=...` and
+         `export DATABRICKS_CLIENT_SECRET=...` in shell. Store env var references in manifest.
+       - **No** → Recommend installing the Databricks CLI (`brew install databricks` or
+         https://docs.databricks.com/dev-tools/cli/install.html) and running
+         `databricks auth login --host https://{host}`.
+
+After collecting details and creating the manifest, **check MCP server status:**
+- Read `~/.claude/mcp.json` — look for a `"databricks"` key under `mcpServers`
+- If **not present**, instruct the user to install the AI Dev Kit:
+  ```
+  bash <(curl -sL https://raw.githubusercontent.com/databricks-solutions/ai-dev-kit/main/install.sh)
+  ```
+  The installer clones the AI Dev Kit repo, creates its own venv, and writes the MCP config
+  to `~/.claude/mcp.json`. Restart Claude Code after running it.
+- If **already present**: MCP is configured. No further action needed.
 
 ### Step 3: Create Dataset Brain
 1. Generate a dataset_id from the display name (lowercase, hyphens)

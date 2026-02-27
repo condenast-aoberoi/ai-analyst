@@ -19,6 +19,7 @@ from helpers.dialects.duckdb_dialect import DuckDBDialect
 from helpers.dialects.postgres import PostgresDialect
 from helpers.dialects.bigquery import BigQueryDialect
 from helpers.dialects.snowflake import SnowflakeDialect
+from helpers.dialects.databricks import DatabricksDialect
 
 
 # Registry mapping connection_type strings to dialect classes.
@@ -29,6 +30,7 @@ _DIALECT_MAP: dict[str, type[SQLDialect]] = {
     "postgresql": PostgresDialect,
     "bigquery": BigQueryDialect,
     "snowflake": SnowflakeDialect,
+    "databricks": DatabricksDialect,
 }
 
 
@@ -37,8 +39,8 @@ def get_dialect(connection_type: str = "duckdb") -> SQLDialect:
 
     Args:
         connection_type: One of ``'duckdb'``, ``'motherduck'``, ``'postgres'``,
-            ``'postgresql'``, ``'bigquery'``, ``'snowflake'``.  Defaults to
-            ``'duckdb'``.
+            ``'postgresql'``, ``'bigquery'``, ``'snowflake'``, ``'databricks'``.
+            Defaults to ``'duckdb'``.
 
     Returns:
         An instantiated SQLDialect subclass.

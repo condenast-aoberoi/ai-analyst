@@ -1,0 +1,54 @@
+# Connection Template: Databricks SQL Warehouse (Unity Catalog)
+# Copy to .knowledge/datasets/{name}/manifest.yaml and fill in values.
+# Requires: pip install databricks-sql-connector
+#
+# Interactive analysis also uses the Databricks AI Dev Kit MCP server.
+# Install: bash <(curl -sL https://raw.githubusercontent.com/databricks-solutions/ai-dev-kit/main/install.sh)
+#
+# Auth — choose ONE method below, delete the other two blocks.
+# CLI profile is recommended: no secrets stored in this file.
+# Never hardcode tokens; always reference environment variables.
+
+dataset_id: "{dataset_id}"
+display_name: "{Display Name}"
+description: "{Brief description of the dataset}"
+domain: "{e-commerce|saas|fintech|marketplace|other}"
+created_at: "{YYYY-MM-DD}"
+is_seed: false
+
+connection:
+  type: databricks
+  host: "{workspace}.cloud.databricks.com"  # workspace hostname, no https://
+                                            # Azure: {workspace}.azuredatabricks.net
+                                            # AWS:   {workspace}.cloud.databricks.com
+                                            # GCP:   {workspace}.gcp.databricks.com
+  http_path: "/sql/1.0/warehouses/{id}"     # from Databricks UI → SQL Warehouses → Connection Details
+  catalog: "{unity_catalog_name}"           # e.g., main, hive_metastore
+  schema: "{schema_name}"                   # e.g., default, analytics
+
+  # --- Auth: Databricks CLI profile (recommended — no secrets in this file) ---
+  cli_profile: "DEFAULT"                   # profile name from ~/.databrickscfg
+                                           # run: databricks auth login --host https://{host}
+
+  # --- Auth: Personal Access Token (PAT — alternative) ---
+  # token: "$DATABRICKS_TOKEN"            # export DATABRICKS_TOKEN=dapi...
+
+  # --- Auth: OAuth M2M (alternative) ---
+  # client_id: "$DATABRICKS_CLIENT_ID"
+  # client_secret: "$DATABRICKS_CLIENT_SECRET"
+
+schema_prefix: "{unity_catalog_name}.{schema_name}"  # e.g., main.analytics — omit schema part if not used
+
+summary:
+  table_count: null
+  total_rows: null
+  date_range: null
+  primary_entities: []
+  key_dimensions: []
+  last_profiled: null
+
+local_data: null
+
+status: active
+last_used: null
+analysis_count: 0
